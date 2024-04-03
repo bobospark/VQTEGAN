@@ -1,0 +1,154 @@
+#--------------------------------------------------------------
+#  Few-Shot으로 Trained 된 VQ-Augmentation을 통해
+#  Class당 16개의 Augmentation된 데이터셋을 만드는 코드
+#--------------------------------------------------------------
+
+import torch
+import torch.nn as nn
+import pickle
+import os
+import numpy as np
+from Few_Shot_data import Few_Shot
+
+from torch.utils.data.dataloader import DataLoader
+
+## RoBERTa Few-shot Learning 시 Augmentation Dataset을 만드는 코드
+class MakeAugmentation(nn.Module):
+    def __init__(self, args):
+        super(MakeAugmentation, self).__init__()
+        self.args = args
+        torch.manual_seed(args.seed)
+
+        # Define the path to the saved model file
+        LM_embeddings_file_path = '/workspace/dataset/%s_embeddings.pkl'%(args.model_name)
+
+        # Load the model from the file using pickle
+        with open(LM_embeddings_file_path, "rb") as f:
+            self.LM_embeddings = pickle.load(f).to(device = args.device)
+        
+        #  'mrpc', 'qqp', 'stsb', 'mnli', 'mnli-mm', 'qnli', 'rte', 'wnli', 
+        if args.data_augmentation :
+            if args.augmentation in ['VQ-TEGAN', 'GAN']:
+                if args.augmentation == 'VQ-TEGAN':
+                    vq_model_file_path = '%s/%s_%s_%s.pkl'%(args.vq_model_path, args.model_name, args.vq_lr, args.num_codebook_vectors)
+                
+                if args.augmentation == 'GAN':
+                    vq_model_file_path = '/%s/cache_gan_generators/%s/%s_%s_%s_%s.pkl'%('workspace', args.model_name, args.model_name, args.few_shot_type, args.dataset, args.seed)
+                
+                with open(vq_model_file_path, "rb") as f:
+                    self.model_vq = pickle.load(f).to(device = args.device)
+            if args.augmentation == 'EDA':
+                self.model_vq = []
+
+    def forward(self, args, train_eval = None, ):  # num_classes = None, num_shots = None
+
+        dataset = Few_Shot(args)  # from test_data.py
+
+        samples, indexes, classes = dataset.forward(args, train_eval = train_eval)
+        
+        # index 리스트를 파일에 저장
+        if train_eval == 'train':
+            if not os.path.exists('/workspace/cache_index'):
+                os.mkdir('/workspace/cache_index')
+
+            index_file_path = f'cache_index/{args.dataset}_seed_{args.seed}_indexes.pkl'
+
+            with open(index_file_path , 'wb') as f:
+                pickle.dump(indexes, f)
+
+        ##### Make Train data set to Embedding #####
+
+        self.embeddings = []
+        self.attention_mask_ = []
+        self.labels = []
+
+        for token in samples:
+            input_ids = token[0]['input_ids'].to(device = args.device)  # (batch_size, seq_len)
+            attention_mask = token[0]['attention_mask'].to(device = args.device)  # (batch_size, seq_len)
+            label = token[1].detach().cpu().numpy()
+            
+            with torch.no_grad():
+                embedded_data = self.LM_embeddings[input_ids]  # <- 이거가 다른거였음 그냥
+                embeddings = embedded_data.detach().cpu().numpy()
+            
+            self.embeddings.append(torch.tensor(embeddings))
+            self.attention_mask_.append(torch.tensor(attention_mask).long())
+            self.labels.append(torch.tensor(label).long())
+                
+
+        ##### Make Train Augmentation data set #####
+
+        if train_eval == 'train':  # eval의 경우 Augmetation이 필요 없으므로 Pass
+            if args.data_augmentation :
+                if args.augmentation in ['VQ-TEGAN', 'GAN']:
+                    if args.augmentation == 'VQ_TEGAN':
+                        self.model_vq.eval()
+                        augmented_data = []
+                        total_augmented_data = []
+                        ## 문장들을 하나씩 뽑아서 Augmentation을 진행한다.
+                        for embs, label in zip(self.embeddings, self.labels):
+                            embs = embs.to(device = args.device)
+                            label = label.to(device = args.device)
+
+                            decoded_sentence = []
+                            with torch.no_grad():
+                                # 단어들을 하나씩 뽑아서 학습 진행
+                                for j in range(embs.shape[0]):
+                                    text = embs[j,:].view(1 , -1) 
+                                    decoded_text = self.model_vq(text)[0]  # min_encoding_indices와 q_lossㄴ는 빼고 뽑음
+                                    decoded_sentence.append(decoded_text)
+                                augmented_data = torch.cat(decoded_sentence, dim = 0) # [67, 1024]
+                                augmented_data_mixture = embs*args.rate_of_real + augmented_data*(1 - args.rate_of_real)
+                                total_augmented_data.append(augmented_data_mixture)
+
+                        total_augmented_data_set = torch.cat(total_augmented_data, dim = 0).reshape(len(total_augmented_data), args.max_seq_length, args.text_shape)
+                        self.embeddings = torch.cat(self.embeddings, dim = 0).reshape(len(self.embeddings), args.max_seq_length, args.text_shape).to(device = args.device)
+                        self.attention_mask = torch.cat(self.attention_mask_, dim = 0).reshape(len(self.embeddings), args.max_seq_length).to(device = args.device)
+                        
+                        return self.embeddings, total_augmented_data_set, self.attention_mask ,self.labels
+                    
+                    if args.augmentation == 'GAN':
+                        self.model_vq.eval()
+                        augmented_data = []
+                        total_augmented_data = []
+                        ## 문장들을 하나씩 뽑아서 Augmentation을 진행한다.
+                        cuda = True if torch.cuda.is_available() else False
+                        Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
+
+                        # for embs, label in zip(self.embeddings, self.labels):
+                        z = Tensor(np.random.normal(0, 1, (len(self.embeddings), args.gan_latent_dim)))
+                        z = z.to(device = args.device)
+
+                        # labels = self.labels.to(device = args.device)
+                        labels = torch.tensor(self.labels).to(device = args.device)
+                        # total_augmented_data.append(self.model_vq(z, labels))
+                        with torch.no_grad():
+                            total_augmented_data_set = self.model_vq(z, labels)
+
+                        self.embeddings = torch.cat(self.embeddings, dim = 0).reshape(len(self.embeddings), args.max_seq_length, args.text_shape).to(device = args.device)
+                        self.attention_mask = torch.cat(self.attention_mask_, dim = 0).reshape(len(self.embeddings), args.max_seq_length).to(device = args.device)
+                        
+                        return self.embeddings, total_augmented_data_set, self.attention_mask ,self.labels
+
+
+                if args.augmentation == 'EDA':
+                    self.embeddings = torch.cat(self.embeddings, dim = 0).reshape(len(self.embeddings), args.max_seq_length, args.text_shape).to(device = args.device)  # 67은 max_length로 바꿔야함 
+                    self.attention_mask = torch.cat(self.attention_mask_, dim = 0).reshape(len(self.embeddings), args.max_seq_length).to(device = args.device)               
+                    _ = []
+                    
+                    return self.embeddings, _, self.attention_mask ,self.labels
+                # Few-shot learning을 위한 data augmentation을 하지 않는다면
+
+            else:  # Conventional Few-shot learning cell
+                self.embeddings = torch.cat(self.embeddings, dim = 0).reshape(len(self.embeddings), args.max_seq_length, args.text_shape).to(device = args.device)  # 67은 max_length로 바꿔야함 
+                self.attention_mask = torch.cat(self.attention_mask_, dim = 0).reshape(len(self.embeddings), args.max_seq_length).to(device = args.device)               
+                _ = []
+                
+                return self.embeddings, _, self.attention_mask ,self.labels
+            
+        if train_eval != 'train':  # For Evaluation Cell
+            self.embeddings = torch.cat(self.embeddings, dim = 0).reshape(len(self.embeddings), args.max_seq_length, args.text_shape).to(device = args.device)  # 67은 max_length로 바꿔야함 
+            self.attention_mask = torch.cat(self.attention_mask_, dim = 0).reshape(len(self.embeddings), args.max_seq_length).to(device = args.device)
+            _ = []
+            return self.embeddings, _, self.attention_mask ,self.labels
+        
