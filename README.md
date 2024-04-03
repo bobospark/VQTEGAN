@@ -1,11 +1,11 @@
 VQ-TEGAN: Data Augmentation with Text Embedding for Few-shot Learning
 
 Full Process of VQ-TEGAN
-![Figure_Full_Process_vf](https://github.com/bobospark/VQTEGAN/assets/118425851/6af77cb9-f833-428c-a251-ed75cb6a36d8)
+![github_FullProcess](https://github.com/bobospark/VQTEGAN/assets/118425851/ad4bba79-6f7b-4cfa-83b6-efb699f9ad5d)
 
 
 VQ-Augmentation의 Generator 학습 Figure.
 
 Figure of training the Generator of VQ-TEGAN
 
-![Figure_VQTEGAN_ver2 3](https://github.com/bobospark/VQTEGAN/assets/118425851/9b7e1ce4-f5e5-41cd-a9bc-0c5b08ceead7)
+![github_VQTEGAN](https://github.com/bobospark/VQTEGAN/assets/118425851/8a0c5945-9f1a-41d7-a08f-592c920bf36f)
